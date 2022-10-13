@@ -36,6 +36,7 @@ parser.add_argument('--n_bit', type=int, default=2, help='number of bits')
 parser.add_argument('--quantize_downsample', type=str, default='True', help='quantize downsampling layer or not')
 parser.add_argument('-j', '--workers', default=40, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
+parser.add_argument('--load_pretrained_weight_student',type=str,default = None)
 args = parser.parse_args()
 
 resnet_dict = {'resnet18': resnet18,
@@ -126,7 +127,10 @@ def main():
     else:
         checkpoint_tar = os.path.join(args.save, real_model_dict[args.student])
 
+    print("checkpoint_tar: ", checkpoint_tar)
+    print(os.path.exists(checkpoint_tar))
     if not os.path.exists(checkpoint_tar):
+        print("not exist")
         if not os.path.exists(args.save):
             os.makedirs(args.save)
         import gdown # pip install gdown
@@ -146,20 +150,23 @@ def main():
             else:
                 model_id = '1IVYC2ngycFWAZlUtOPAdahZbzAwgX6VU'
 
+        print("download!")
         gdown.download(id=model_id, output=checkpoint_tar, quiet=False)
-
+    
     checkpoint = torch.load(checkpoint_tar)
     model_student.load_state_dict(checkpoint, strict=False)
     model_student = nn.DataParallel(model_student).cuda()
 
-    checkpoint_tar = os.path.join(args.save, args.student + '_' + str(args.n_bit) + 'bit_quantize_downsample_' + str(args.quantize_downsample), 'checkpoint.pth.tar')
-    if os.path.exists(checkpoint_tar):
-        logging.info('loading checkpoint {} ..........'.format(checkpoint_tar))
-        checkpoint = torch.load(checkpoint_tar)
+    # checkpoint_tar = os.path.join(args.save, args.student + '_' + str(args.n_bit) + 'bit_quantize_downsample_' + str(args.quantize_downsample), 'checkpoint.pth.tar')
+    if args.load_pretrained_weight_student:
+        
+    # if os.path.exists(checkpoint_tar):
+        logging.info('loading checkpoint {} ..........'.format(args.load_pretrained_weight_student))
+        checkpoint = torch.load(args.load_pretrained_weight_student)
         start_epoch = checkpoint['epoch'] + 1
         best_top1_acc = checkpoint['best_top1_acc']
         model_student.load_state_dict(checkpoint['state_dict'], strict=False)
-        logging.info("loaded checkpoint {} epoch = {}" .format(checkpoint_tar, checkpoint['epoch']))
+        logging.info("loaded checkpoint {} epoch = {}" .format(args.load_pretrained_weight_student, checkpoint['epoch']))
 
     # adjust the learning rate according to the checkpoint
     for epoch in range(start_epoch):
@@ -200,27 +207,29 @@ def main():
 
     # train the model
     epoch = start_epoch
+    valid_obj, valid_top1_acc, valid_top5_acc = validate(epoch, val_loader, model_student, criterion, args)
+    print("valid_top1_acc: ", valid_top1_acc)
 
-    while epoch < args.epochs:
-        train_obj, train_top1_acc,  train_top5_acc = train(epoch,  train_loader, model_student, model_teacher, criterion_kd, optimizer, scheduler)
-        valid_obj, valid_top1_acc, valid_top5_acc = validate(epoch, val_loader, model_student, criterion, args)
+    # while epoch < args.epochs:
+    #     train_obj, train_top1_acc,  train_top5_acc = train(epoch,  train_loader, model_student, model_teacher, criterion_kd, optimizer, scheduler)
+    #     valid_obj, valid_top1_acc, valid_top5_acc = validate(epoch, val_loader, model_student, criterion, args)
 
-        is_best = False
-        if valid_top1_acc > best_top1_acc:
-            best_top1_acc = valid_top1_acc
-            is_best = True
+    #     is_best = False
+    #     if valid_top1_acc > best_top1_acc:
+    #         best_top1_acc = valid_top1_acc
+    #         is_best = True
 
-        save_checkpoint({
-            'epoch': epoch,
-            'state_dict': model_student.state_dict(),
-            'best_top1_acc': best_top1_acc,
-            'optimizer' : optimizer.state_dict(),
-            }, is_best, os.path.join(args.save, args.student + '_' + str(args.n_bit) + 'bit_quantize_downsample_' + str(args.quantize_downsample)))
+    #     save_checkpoint({
+    #         'epoch': epoch,
+    #         'state_dict': model_student.state_dict(),
+    #         'best_top1_acc': best_top1_acc,
+    #         'optimizer' : optimizer.state_dict(),
+    #         }, is_best, os.path.join(args.save, args.student + '_' + str(args.n_bit) + 'bit_quantize_downsample_' + str(args.quantize_downsample)))
 
-        epoch += 1
+    #     epoch += 1
 
-    training_time = (time.time() - start_t) / 36000
-    print('total training time = {} hours'.format(training_time))
+    # training_time = (time.time() - start_t) / 36000
+    # print('total training time = {} hours'.format(training_time))
 
 
 def train(epoch, train_loader, model_student, model_teacher, criterion, optimizer, scheduler):
