@@ -114,7 +114,7 @@ def inject_noise(args,model_state_dict, random_method, num_bits, prob,  epoch, b
             scaling_factor = gamma * torch.mean(torch.mean(torch.mean(abs(cur_weight),dim=3,keepdim=True),dim=2,keepdim=True),dim=1,keepdim=True)
            
             
-            mask = create_mask(cur_weight.shape[0],cur_weight.shape[1],prob=prob, epoch=epoch)
+            mask = create_mask(cur_weight.shape[0],cur_weight.shape[1],cur_weight.shape[2],cur_weight.shape[3],prob=prob, epoch=epoch)
 
             
             if random_method == 'uniform':
@@ -172,12 +172,12 @@ def inject_noise(args,model_state_dict, random_method, num_bits, prob,  epoch, b
                 noise_unit = (2/(2**num_bits -1))*scaling_factor
                 # noise = noise_unit*mask*uniform_noise_mask
                 
-                noise = torch.zeros(size=cur_weight.shape)
+                noise = torch.zeros(size=cur_weight.shape).cuda()
                 G = torch.Generator()
                 G.manual_seed(epoch)
-                for i in np.arange(start=min,stop=max): # 0.4999 < x < 0.5001
+                for i in np.arange(start=min.detach().cpu(),stop=max.detach().cpu()): # 0.4999 < x < 0.5001
                     boundary_mask = ((b4_round - i) <= (0.5 + boundaryRange)) * ((b4_round - i) >= (0.5 - boundaryRange))
-                    uniform_noise_mask = torch.randint(low=-1,high=1,size=cur_weight.shape, generator=G)
+                    uniform_noise_mask = torch.randint(low=-1,high=1,size=cur_weight.shape, generator=G).cuda()
                     uniform_noise_mask = torch.where(uniform_noise_mask == -1.0, uniform_noise_mask, 1.0)
                     noise = noise + boundary_mask.float() * uniform_noise_mask * noise_unit
                     
