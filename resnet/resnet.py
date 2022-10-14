@@ -24,6 +24,23 @@ def quanconv1x1(in_planes, out_planes, num_bits, stride=1):
     """1x1 convolution"""
     return HardQuantizeConv(in_planes, out_planes, num_bits, kernel_size=1, stride=stride, padding=0)
 
+
+def grad_scale(x, scale):
+    y = x
+    y_grad = x * scale
+    return (y - y_grad).detach() + y_grad
+
+
+def round_pass(x):
+    y = x.round()
+    y_grad = x
+    return (y - y_grad).detach() + y_grad
+
+
+def clip(x, eps):
+    x_clip = torch.where(x > eps, x, eps)
+    return x - x.detach() + x_clip.detach()
+
 class LearnableBias(nn.Module):
     def __init__(self, out_chn):
         super(LearnableBias, self).__init__()
@@ -80,6 +97,90 @@ class LTQ(nn.Module):
         out = out * self.scale2
 
         return out
+
+class LSQ(nn.Module):
+    def __init__(self, bit, normalize_first=False, all_positive=False, symmetric = False, per_channel=True):
+        super().__init__()
+        self.eps = 1e-5
+        self.gamma = 1.0
+        self.bit = bit
+        self.normalize_first = normalize_first
+        if all_positive:
+            # assert not symmetric, "Positive quantization cannot be symmetric"
+            if bit == 1:
+                self.thd_neg = 0
+                self.thd_pos = 1
+            elif symmetric:
+                # unsigned activation is quantized to [0, 2^b-2]
+                self.thd_neg = 0
+                self.thd_pos = 2 ** bit - 2
+            else:
+                # unsigned activation is quantized to [0, 2^b-1]
+                self.thd_neg = 0
+                self.thd_pos = 2 ** bit - 1
+        else:
+            if bit == 1:
+                self.thd_neg = -1
+                self.thd_pos = 1
+            elif symmetric:
+                # signed weight/activation is quantized to [-2^(b-1)+1, 2^(b-1)-1]
+                self.thd_neg = - 2 ** (bit - 1) + 1
+                self.thd_pos = 2 ** (bit - 1) - 1
+            else:
+                # signed weight/activation is quantized to [-2^(b-1), 2^(b-1)-1]
+                self.thd_neg = - 2 ** (bit - 1)
+                self.thd_pos = 2 ** (bit - 1) - 1
+
+        self.bit = bit
+        self.per_channel = per_channel
+        self.all_positive = all_positive
+        self.symmetric = symmetric
+        self.s = torch.nn.Parameter(torch.ones(1))
+
+
+    def normalize(self, x):
+        if self.normalize_first:
+            std, mean = torch.std_mean(x, dim=list(range(1, x.ndim)),
+                    keepdim=True, unbiased=False)
+            scale = self.gamma * x[0].numel() ** -0.5
+            return scale * (x - mean) / (std + self.eps)
+        else:
+            return x
+
+    def init_from(self, x, *args, **kwargs):
+        x = self.normalize(x)
+        if self.per_channel:
+            self.s = torch.nn.Parameter(
+                x.detach().abs().mean(dim=list(range(1, x.dim())), keepdim=True) * 2 / (self.thd_pos ** 0.5))
+        else:
+            self.s = torch.nn.Parameter(x.detach().abs().mean() * 2 / (self.thd_pos ** 0.5))
+
+    def forward(self, x):
+        if self.per_channel:
+            s_grad_scale = 1.0 / ((self.thd_pos * x[0].numel()) ** 0.5)
+            # s_grad_scale = 1.0 / ((self.thd_pos * x.numel()) ** 0.5)
+        else:
+            s_grad_scale = 1.0 / ((self.thd_pos * x.numel()) ** 0.5)
+        s_scale = grad_scale(clip(self.s, torch.tensor(self.eps).float().to(self.s.device)), s_grad_scale)
+        # s_scale = grad_scale(self.s, s_grad_scale)
+
+        x = x / s_scale
+        if self.bit == 1 and not self.all_positive:
+            x = torch.sign(x)
+        else:
+            x = torch.clamp(x, self.thd_neg, self.thd_pos)
+            x = round_pass(x)
+        x = x * s_scale
+        return x
+
+    def extra_repr(self):
+        return (
+            f"bit={self.bit}, norm=({self.normalize_first}, "
+            f"{self.eps}, {self.gamma}), "
+            f"all_positive={self.all_positive}, "
+            f"symmetric={self.symmetric}, "
+            f"per_channel={self.per_channel}"
+        )
 
 class HardQuantizeConv(nn.Module):
     def __init__(self, in_chn, out_chn, num_bits, kernel_size=3, stride=1, padding=1):
@@ -143,6 +244,75 @@ class BasicBlock(nn.Module):
         self.prelu2 = nn.PReLU(planes)
         self.bias22 = LearnableBias(planes)
         self.quan2 = LTQ(n_bit)
+        self.conv2 = quanconv3x3(planes, planes, n_bit)
+        self.bn2 = norm_layer(planes)
+        self.downsample = downsample
+        self.stride = stride
+        self.bias31 = LearnableBias(planes)
+        self.prelu3 = nn.PReLU(planes)
+        self.bias32 = LearnableBias(planes)
+
+    def forward(self, x: Tensor) -> Tensor:
+        identity = x
+
+        out = self.bias11(x)
+        out = self.prelu1(out)
+        out = self.bias12(out)
+        out = self.quan1(out)
+        out = self.conv1(out)
+        out = self.bn1(out)
+
+        out = self.bias21(out)
+        out = self.prelu2(out)
+        out = self.bias22(out)
+        out = self.quan2(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.bias31(out)
+        out = self.prelu3(out)
+        out = self.bias32(out)
+
+        return out
+
+class BasicBlock_LSQ(nn.Module):
+    expansion: int = 1
+
+    def __init__(
+        self,
+        n_bit: int,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: Optional[Callable[..., nn.Module]] = None
+    ) -> None:
+        super(BasicBlock_LSQ, self).__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        if groups != 1 or base_width != 64:
+            raise ValueError('BasicBlock only supports groups=1 and base_width=64')
+        if dilation > 1:
+            raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
+
+        self.bias11 = LearnableBias(inplanes)
+        self.prelu1 = nn.PReLU(inplanes)
+        self.bias12 = LearnableBias(inplanes)
+        self.quan1 = LSQ(bit = n_bit, all_positive=True,per_channel=True)
+        self.conv1 = quanconv3x3(inplanes, planes, n_bit, stride)
+        self.bn1 = norm_layer(planes)
+
+        self.bias21 = LearnableBias(planes)
+        self.prelu2 = nn.PReLU(planes)
+        self.bias22 = LearnableBias(planes)
+        self.quan2 = LSQ(bit = n_bit, all_positive=True,per_channel=True)
         self.conv2 = quanconv3x3(planes, planes, n_bit)
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
@@ -261,6 +431,88 @@ class Bottleneck(nn.Module):
 
         return out
 
+class Bottleneck_LSQ(nn.Module):
+
+    expansion: int = 4
+
+    def __init__(
+        self,
+        n_bit: int,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: Optional[Callable[..., nn.Module]] = None
+    ) -> None:
+        super(Bottleneck_LSQ, self).__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        width = int(planes * (base_width / 64.)) * groups
+
+        self.bias11 = LearnableBias(inplanes)
+        self.prelu1 = nn.PReLU(inplanes)
+        self.bias12 = LearnableBias(inplanes)
+        self.quan1 = LSQ(bit = n_bit, all_positive=True,per_channel=True)
+        self.conv1 = quanconv1x1(inplanes, width, n_bit)
+        self.bn1 = norm_layer(width)
+
+        self.bias21 = LearnableBias(width)
+        self.prelu2 = nn.PReLU(width)
+        self.bias22 = LearnableBias(width)
+        self.quan2 = LSQ(bit = n_bit, all_positive=True,per_channel=True)
+        self.conv2 = quanconv3x3(width, width, n_bit, stride=stride)
+        self.bn2 = norm_layer(width)
+
+        self.bias31 = LearnableBias(width)
+        self.prelu3 = nn.PReLU(width)
+        self.bias32 = LearnableBias(width)
+        self.quan3 = LSQ(bit = n_bit, all_positive=True,per_channel=True)
+        self.conv3 = quanconv1x1(width, planes * self.expansion, n_bit)
+        self.bn3 = norm_layer(planes * self.expansion)
+
+        self.downsample = downsample
+        self.stride = stride
+        self.bias01 = LearnableBias(planes * self.expansion)
+        self.prelu0 = nn.PReLU(planes * self.expansion)
+        self.bias02 = LearnableBias(planes * self.expansion)
+
+    def forward(self, x: Tensor) -> Tensor:
+        identity = x
+
+        out = self.bias11(x)
+        out = self.prelu1(out)
+        out = self.bias12(out)
+        out = self.quan1(out)
+        out = self.conv1(out)
+        out = self.bn1(out)
+
+        out = self.bias21(out)
+        out = self.prelu2(out)
+        out = self.bias22(out)
+        out = self.quan2(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        out = self.bias31(out)
+        out = self.prelu3(out)
+        out = self.bias32(out)
+        out = self.quan3(out)
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.bias01(out)
+        out = self.prelu0(out)
+        out = self.bias02(out)
+
+        return out
+
 
 class ResNet(nn.Module):
 
@@ -268,7 +520,7 @@ class ResNet(nn.Module):
         self,
         n_bit: int,
         quantize_downsample: bool,
-        block: Type[Union[BasicBlock, Bottleneck]],
+        block: Type[Union[BasicBlock, Bottleneck, BasicBlock_LSQ, Bottleneck_LSQ]],
         layers: List[int],
         num_classes: int = 1000,
         zero_init_residual: bool = False,
@@ -322,7 +574,7 @@ class ResNet(nn.Module):
                 elif isinstance(m, BasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)
 
-    def _make_layer(self, block: Type[Union[BasicBlock, Bottleneck]], planes: int, blocks: int,
+    def _make_layer(self, block: Type[Union[BasicBlock, Bottleneck, BasicBlock_LSQ, Bottleneck_LSQ]], planes: int, blocks: int,
                     stride: int = 1, dilate: bool = False) -> nn.Sequential:
         norm_layer = self._norm_layer
         downsample = None
@@ -403,3 +655,17 @@ def resnet50(n_bit: int, quantize_downsample: bool, pretrained: bool = False, pr
     return _resnet('resnet50', n_bit, quantize_downsample, Bottleneck, [3, 4, 6, 3], pretrained, progress,
                    **kwargs)
 
+
+def resnet18_LSQ(n_bit: int, quantize_downsample: bool, pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    return _resnet('resnet18', n_bit, quantize_downsample, BasicBlock_LSQ, [2, 2, 2, 2], pretrained, progress,
+                   **kwargs)
+
+
+def resnet34_LSQ(n_bit: int, quantize_downsample: bool, pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    return _resnet('resnet34', n_bit, quantize_downsample, BasicBlock_LSQ, [3, 4, 6, 3], pretrained, progress,
+                   **kwargs)
+
+
+def resnet50_LSQ(n_bit: int, quantize_downsample: bool, pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    return _resnet('resnet50', n_bit, quantize_downsample, Bottleneck_LSQ, [3, 4, 6, 3], pretrained, progress,
+                   **kwargs)
