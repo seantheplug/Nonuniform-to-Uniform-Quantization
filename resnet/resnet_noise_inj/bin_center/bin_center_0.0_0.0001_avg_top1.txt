@@ -1,0 +1,6 @@
+Sample 0, Epoch 0, Top1 accuracy: 69.41999816894531) 
+Sample 1, Epoch 0, Top1 accuracy: 69.5199966430664) 
+Sample 2, Epoch 0, Top1 accuracy: 69.47200012207031) 
+Sample 3, Epoch 0, Top1 accuracy: 69.42599487304688) 
+Sample 4, Epoch 0, Top1 accuracy: 69.41799926757812) 
+*** Average Top1 accuracy: 69.45120239257812 

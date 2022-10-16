@@ -18,7 +18,7 @@ from utils.utils import *
 from utils import KD_loss
 from torchvision import datasets, transforms
 from torch.autograd import Variable
-from resnet import resnet18, resnet34, resnet50
+from resnet import resnet18, resnet34, resnet50, resnet18_LSQ, resnet34_LSQ, resnet50_LSQ
 import torchvision.models as models
 
 parser = argparse.ArgumentParser("n2uq")
@@ -41,15 +41,24 @@ args = parser.parse_args()
 
 resnet_dict = {'resnet18': resnet18,
         'resnet34': resnet34,
-        'resnet50': resnet50}
+        'resnet50': resnet50,
+        'resnet18_lsq': resnet18_LSQ,
+        'resnet34_lsq': resnet34_LSQ,
+        'resnet50_lsq': resnet50_LSQ}
 
 real_model_dict_rewrite_1x1 = {'resnet18': 'real_res18.pth.tar',
         'resnet34': 'real_res34.pth.tar',
-        'resnet50': 'real_res50.pth.tar'}
+        'resnet50': 'real_res50.pth.tar',
+        'resnet18_lsq': 'real_res18.pth.tar',
+        'resnet34_lsq': 'real_res34.pth.tar',
+        'resnet50_lsq': 'real_res50.pth.tar'}
 
 real_model_dict = {'resnet18': 'resnet18-f37072fd.pth',
         'resnet34': 'resnet34-b627a593.pth',
-        'resnet50': 'resnet50-0676ba61.pth'}
+        'resnet50': 'resnet50-0676ba61.pth',
+        'resnet18_lsq': 'resnet18-f37072fd.pth',
+        'resnet34_lsq': 'resnet34-b627a593.pth',
+        'resnet50_lsq': 'resnet50-0676ba61.pth'}
 
 
 CLASSES = 1000
@@ -134,17 +143,17 @@ def main():
         if not os.path.exists(args.save):
             os.makedirs(args.save)
         import gdown # pip install gdown
-        if args.student == 'resnet18':
+        if args.student == 'resnet18' or args.student == 'resnet18_lsq':
             if args.quantize_downsample:
                 model_id = '1BfWhr1hzaS_5zHpQDREVRiPOCmXEWC7q'
             else:
                 model_id = '1DhnwgWsAYOTIrTJLaMkT7FQD7oHXMz41'
-        elif args.student == 'resnet34':
+        elif args.student == 'resnet34' or args.student == 'resnet34_lsq':
             if args.quantize_downsample:
                 model_id = '1kvrloDtpJjhgyF4bX0z0CvHFeCKOHj_B'
             else:
                 model_id = '1kbQfXr4YS9XsboYV_-nG4kVHe9MVk5N1'
-        elif args.student == 'resnet50':
+        elif args.student == 'resnet50' or args.student == 'resnet50_lsq':
             if args.quantize_downsample:
                 model_id = '1cySVFj5PV0ngJlvLmNRcIufzOLRF_ut0'
             else:
@@ -207,29 +216,29 @@ def main():
 
     # train the model
     epoch = start_epoch
-    valid_obj, valid_top1_acc, valid_top5_acc = validate(epoch, val_loader, model_student, criterion, args)
-    print("valid_top1_acc: ", valid_top1_acc)
+    # valid_obj, valid_top1_acc, valid_top5_acc = validate(epoch, val_loader, model_student, criterion, args)
+    # print("valid_top1_acc: ", valid_top1_acc)
 
-    # while epoch < args.epochs:
-    #     train_obj, train_top1_acc,  train_top5_acc = train(epoch,  train_loader, model_student, model_teacher, criterion_kd, optimizer, scheduler)
-    #     valid_obj, valid_top1_acc, valid_top5_acc = validate(epoch, val_loader, model_student, criterion, args)
+    while epoch < args.epochs:
+        train_obj, train_top1_acc,  train_top5_acc = train(epoch,  train_loader, model_student, model_teacher, criterion_kd, optimizer, scheduler)
+        valid_obj, valid_top1_acc, valid_top5_acc = validate(epoch, val_loader, model_student, criterion, args)
 
-    #     is_best = False
-    #     if valid_top1_acc > best_top1_acc:
-    #         best_top1_acc = valid_top1_acc
-    #         is_best = True
+        is_best = False
+        if valid_top1_acc > best_top1_acc:
+            best_top1_acc = valid_top1_acc
+            is_best = True
 
-    #     save_checkpoint({
-    #         'epoch': epoch,
-    #         'state_dict': model_student.state_dict(),
-    #         'best_top1_acc': best_top1_acc,
-    #         'optimizer' : optimizer.state_dict(),
-    #         }, is_best, os.path.join(args.save, args.student + '_' + str(args.n_bit) + 'bit_quantize_downsample_' + str(args.quantize_downsample)))
+        save_checkpoint({
+            'epoch': epoch,
+            'state_dict': model_student.state_dict(),
+            'best_top1_acc': best_top1_acc,
+            'optimizer' : optimizer.state_dict(),
+            }, is_best, os.path.join(args.save, args.student + '_' + str(args.n_bit) + 'bit_quantize_downsample_' + str(args.quantize_downsample)))
 
-    #     epoch += 1
+        epoch += 1
 
-    # training_time = (time.time() - start_t) / 36000
-    # print('total training time = {} hours'.format(training_time))
+    training_time = (time.time() - start_t) / 36000
+    print('total training time = {} hours'.format(training_time))
 
 
 def train(epoch, train_loader, model_student, model_teacher, criterion, optimizer, scheduler):
