@@ -379,6 +379,7 @@ def main():
         
         epoch = 0
         ## currently only train 1 epoch for each sample
+        local_avg_top1_accuracy = 0
         while epoch < args.epochs:
             train_obj, train_top1_acc,  train_top5_acc = train(epoch,  train_loader, model_student, model_teacher, criterion_kd, optimizer, scheduler)
             valid_obj, valid_top1_acc, valid_top5_acc = validate(epoch, val_loader, model_student, criterion, args)
@@ -391,7 +392,7 @@ def main():
             with open(os.path.join(args.output_dir, str(args.random_method) +'_'+str(args.random_prob)+'_'+str(args.boundaryRange)+'_'+'avg_top1.txt'), 'a+') as f:
                 f.write('Sample {0}, Epoch {1}, Top1 accuracy: {2}) \n'.format(sample, epoch ,valid_top1_acc))
 
-            avg_top1_accuracy += valid_top1_acc
+            local_avg_top1_accuracy += valid_top1_acc
             # save_checkpoint({
             #     'epoch': epoch,
             #     'state_dict': model_student.state_dict(),
@@ -399,7 +400,8 @@ def main():
             #     'optimizer' : optimizer.state_dict(),
             #     }, is_best, os.path.join(args.save, args.student + '_' + str(args.n_bit) + 'bit_quantize_downsample_' + str(args.quantize_downsample)))
             epoch += 1
-            
+        avg_top1_accuracy += local_avg_top1_accuracy / args.epochs
+         
     avg_top1_accuracy = avg_top1_accuracy / args.sample_time
     
     with open(os.path.join(args.output_dir, str(args.random_method) +'_'+str(args.random_prob)+'_'+str(args.boundaryRange)+'_'+'avg_top1.txt'), 'a+') as f:
