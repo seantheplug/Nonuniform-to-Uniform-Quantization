@@ -8,7 +8,7 @@ python3 train_noise_inj.py --data=/home/sliuau/ternary_vit/dataset/imagenet-1k/i
 --batch_size=512 --weight_decay=0 --student=${NETWORK} --n_bit=${N_BIT} \
 --random_method 'bin_center_less_aggro' \
 --random_prob 0.0 \
---boundaryRange 0.001 \
+--boundaryRange 0.0005 \
 --sample_time 20 \
 --learning_rate 0.0000125 \
 --epochs 1 \
@@ -19,7 +19,7 @@ python3 train_noise_inj.py --data=/home/sliuau/ternary_vit/dataset/imagenet-1k/i
 --batch_size=512 --weight_decay=0 --student=${NETWORK} --n_bit=${N_BIT} \
 --random_method 'bin_center_less_aggro' \
 --random_prob 0.0 \
---boundaryRange 0.001 \
+--boundaryRange 0.0005 \
 --sample_time 20 \
 --learning_rate 0.00005 \
 --epochs 1 \
